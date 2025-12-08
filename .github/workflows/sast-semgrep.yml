@@ -2,8 +2,8 @@ name: SAST - Semgrep
 
 on:
   push:
-    branches: {main}
-  pill_request:
+    branches: [main]
+  pull_request:
 
 jobs:
   semgrep:
