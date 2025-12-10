@@ -1,20 +1,39 @@
-onst express = require("express");
+const express = require("express");
 const bodyParser = require("body-parser");
 const cookieParser = require("cookie-parser");
 const crypto = require("crypto");
-// bcrypt is installed but NOT used in the vulnerable baseline:
-const bcrypt = require("bcrypt");
+const bcrypt = require("bcrypt"); // Now actively used for security
 
 const app = express();
 const PORT = 3001;
 
+// --- SECURITY MIDDLEWARE ---
+// 1. Hide tech stack details (Fixes ZAP: "Server Leaks Information")
 app.disable("x-powered-by");
 
 app.use((req, res, next) => {
+  // 2. Content Security Policy (CSP)
   res.set(
     "Content-Security-Policy",
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
   );
+
+  // 3. Permissions Policy (Fixes ZAP: "Permissions Policy Header Not Set")
+  // Restricts access to powerful browser features like camera/mic
+  res.set(
+    "Permissions-Policy",
+    "camera=(), microphone=(), geolocation=(), fullscreen=(self)"
+  );
+
+  // 4. Cache Control (Fixes ZAP: "Storable and Cacheable Content")
+  // Ensures sensitive API responses are not cached by the browser
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.set("Pragma", "no-cache");
+  res.set("Expires", "0");
+
+  // 5. Anti-MIME Sniffing
+  res.set("X-Content-Type-Options", "nosniff");
+
   next();
 });
 
@@ -23,87 +42,88 @@ app.use(bodyParser.json());
 app.use(cookieParser());
 app.use(express.static("public"));
 
-/**
- * VULNERABLE FAKE USER DB
- * For simplicity, we start with a single user whose password is "password123".
- * In the vulnerable version, we hash with a fast hash (SHA-256-like).
- */
+// --- SECURE USER DATABASE ---
+// We generate a valid bcrypt hash for the demo user at startup.
+const SALT_ROUNDS = 10;
+const demoPassword = "password123";
+const demoHash = bcrypt.hashSync(demoPassword, SALT_ROUNDS);
+
 const users = [
   {
     id: 1,
     username: "student",
-    // VULNERABLE: fast hash without salt
-    passwordHash: fastHash("password123") // students must replace this scheme with bcrypt
+    passwordHash: demoHash // Securely hashed
   }
 ];
 
 // In-memory session store
-const sessions = {}; // token -> { userId }
+const sessions = {}; 
 
-/**
- * VULNERABLE FAST HASH FUNCTION
- * Students MUST STOP using this and replace logic with bcrypt.
- */
-function fastHash(password) {
-  return crypto.createHash("sha256").update(password).digest("hex");
-}
+// --- ROUTES ---
 
-// Helper: find user by username
-function findUser(username) {
-  return users.find((u) => u.username === username);
-}
-
-// Home API just to show who is logged in
+// Home API
 app.get("/api/me", (req, res) => {
   const token = req.cookies.session;
   if (!token || !sessions[token]) {
     return res.status(401).json({ authenticated: false });
   }
+  
+  // Verify session expiration (Optional safety check)
   const session = sessions[token];
+  if (Date.now() > session.expiresAt) {
+    delete sessions[token];
+    res.clearCookie("session");
+    return res.status(401).json({ authenticated: false });
+  }
+
   const user = users.find((u) => u.id === session.userId);
+  // Return only safe user info
   res.json({ authenticated: true, username: user.username });
 });
 
-/**
- * VULNERABLE LOGIN ENDPOINT
- * - Uses fastHash instead of bcrypt
- * - Error messages leak whether username exists
- * - Session token is simple and predictable
- * - Cookie lacks security flags
- */
-app.post("/api/login", (req, res) => {
+// Secure Login Endpoint
+app.post("/api/login", async (req, res) => {
   const { username, password } = req.body;
-  const user = findUser(username);
+  const user = users.find((u) => u.username === username);
+
+  // GENERIC ERROR HANDLING
+  // We use a generic message to prevent Username Enumeration.
+  // We also use a constant time comparison via bcrypt to prevent timing attacks.
+  const genericError = { success: false, message: "Invalid username or password" };
 
   if (!user) {
-    // VULNERABLE: username enumeration via message
-    return res
-      .status(401)
-      .json({ success: false, message: "Unknown username" });
+    // Simulate a delay to match bcrypt time (optional advanced mitigation) 
+    // or just return the generic error.
+    return res.status(401).json(genericError);
   }
 
-  const candidateHash = fastHash(password);
-  if (candidateHash !== user.passwordHash) {
-    return res
-      .status(401)
-      .json({ success: false, message: "Wrong password" });
+  const match = await bcrypt.compare(password, user.passwordHash);
+  if (!match) {
+    return res.status(401).json(genericError);
   }
 
-  // VULNERABLE: predictable token
-  const token = username + "-" + Date.now();
+  // SECURE SESSION GENERATION
+  // Use crypto.randomUUID for a high-entropy, unpredictable token
+  const token = crypto.randomUUID();
 
-  // VULNERABLE: session stored without expiration
-  sessions[token] = { userId: user.id };
+  // Store session with expiration (e.g., 1 hour)
+  sessions[token] = { 
+    userId: user.id,
+    expiresAt: Date.now() + 3600000 // 1 hour from now
+  };
 
-  // VULNERABLE: cookie without httpOnly, secure, sameSite
+  // SECURE COOKIE SETTINGS
   res.cookie("session", token, {
-    // students must add: httpOnly: true, secure: true, sameSite: "lax"
+    httpOnly: true,  // Prevents JS access (Mitigates XSS)
+    secure: false,   // Set to TRUE in production (requires HTTPS)
+    sameSite: "strict", // Prevents CSRF
+    maxAge: 3600000  // 1 hour
   });
 
-  // Client-side JS (login.html) will store this token in localStorage (vulnerable)
-  res.json({ success: true, token });
+  res.json({ success: true, token }); // Sending token in body is optional if using cookies
 });
 
+// Logout
 app.post("/api/logout", (req, res) => {
   const token = req.cookies.session;
   if (token && sessions[token]) {
@@ -113,18 +133,9 @@ app.post("/api/logout", (req, res) => {
   res.json({ success: true });
 });
 
+// 404 Handler
 app.use((req, res) => {
-  res.status(404);
-  res.set(
-    "Content-Security-Policy",
-    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
-  );
-  res.set(
-    "Permissions-Policy",
-    "camera=(), microphone=(), geolocation=(), fullscreen=(self)"
-  );
-
-  res.send("Not found");
+  res.status(404).send("Not found");
 });
 
 app.listen(PORT, () => {
