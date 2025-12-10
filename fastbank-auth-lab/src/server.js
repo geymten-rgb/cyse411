@@ -1,4 +1,4 @@
-const express = require("express");
+onst express = require("express");
 const bodyParser = require("body-parser");
 const cookieParser = require("cookie-parser");
 const crypto = require("crypto");
@@ -7,6 +7,16 @@ const bcrypt = require("bcrypt");
 
 const app = express();
 const PORT = 3001;
+
+app.disable("x-powered-by");
+
+app.use((req, res, next) => {
+  res.set(
+    "Content-Security-Policy",
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+  );
+  next();
+});
 
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
@@ -101,6 +111,20 @@ app.post("/api/logout", (req, res) => {
   }
   res.clearCookie("session");
   res.json({ success: true });
+});
+
+app.use((req, res) => {
+  res.status(404);
+  res.set(
+    "Content-Security-Policy",
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+  );
+  res.set(
+    "Permissions-Policy",
+    "camera=(), microphone=(), geolocation=(), fullscreen=(self)"
+  );
+
+  res.send("Not found");
 });
 
 app.listen(PORT, () => {
